@@ -95,7 +95,7 @@ def plot_items_activity_m3(matrix):
 
 
 def get_metric3(ut_matrix):
-    "proportion of items rated by more than 5% users"
+    "Proportion of items rated by more than 5% users."
     items = list(ut_matrix.columns)
     list_ratings_items = []
     for item in items:
