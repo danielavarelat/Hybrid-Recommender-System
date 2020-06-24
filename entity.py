@@ -118,23 +118,31 @@ class CF:
         users_neigs = [list(self.user.utility_matrix.index)[i]
                        for i in indices]
         similarities_list = [similarities[i] for i in range(len(indices))]
+        similarities_list = [i for i in similarities_list if i > 0]
+        users_neigs = users_neigs[:len(similarities_list)]
+        indices = indices[:len(similarities_list)]
         return users_neigs, similarities_list, indices
 
     def CalculatePrediction(self, itemid):
+        um = self.user.utility_matrix.copy()
         index_user = list(self.user.utility_matrix.index).index(self.user.id)
-        mean_rating_user = self.user.utility_matrix.iloc[index_user, :].mean()
+        rating_user = um.iloc[index_user, :]
+        rating_user[rating_user == 0] = np.nan
+        mean_rating_user = np.nanmean(rating_user.values)
+        # mean_rating_user = self.user.utility_matrix.iloc[index_user, :].mean()
         _, similarities, indices = self.getNneighbors()
+
         sum_n_similarities = np.sum(similarities)
         wtd_sum = 0
         for index, i in enumerate(indices):
             user_neig = list(self.user.utility_matrix.index)[i]
             rating_neig = self.user.utility_matrix.loc[user_neig][itemid]
-            average_neig = np.mean(self.user.utility_matrix.iloc[i, :])
-            rating_diff = rating_neig - average_neig
+            average_rating_neig = np.mean(self.user.utility_matrix.iloc[i, :])
+            rating_diff = rating_neig - average_rating_neig
             product = rating_diff * (similarities[index])
             wtd_sum = wtd_sum + product
         prediction = mean_rating_user + (wtd_sum/sum_n_similarities)
-        return prediction
+        return prediction/5
 
     def predict_ratings(self):
         items_subset = list(self.user.utility_matrix.columns)
@@ -148,14 +156,18 @@ class CF:
     def default_rating(self):
         us, sim, ind = self.getNneighbors()
         sum_n_similarities = np.sum(sim)
+        um = self.user.utility_matrix.copy()
         index_user = list(self.user.utility_matrix.index).index(self.user.id)
+        rating_user = um.iloc[index_user, :]
+        rating_user[rating_user == 0] = np.nan
+        # mean_rating_user = np.nanmean(rating_user.values)
         mean_rating_user = self.user.utility_matrix.iloc[index_user, :].mean()
         wtd_sum = 0
         for index, i in enumerate(ind):
             product = - \
                 np.mean(self.user.utility_matrix.iloc[i, :]) * (sim[index])
             wtd_sum = wtd_sum + product
-        prediction = mean_rating_user + (wtd_sum/sum_n_similarities)
+        prediction = (mean_rating_user + (wtd_sum/sum_n_similarities))/5
         interactions_neihgs = []
         for i in us:
             interactions_neihgs.append(list(
@@ -211,22 +223,60 @@ class HYBRID():
                 by=self.user.id, axis=0, ascending=False).iloc[0:topn, 0].index)
         return d
 
-    def compare(self, weights, topn, number_items_test):
+    def compare_hits(self, list_weights, topn, number_items_test):
         name_row = 'hit_{}'.format(topn)
-        df_hit = pd.DataFrame(index=[name_row], columns=['CB', 'MF', 'CF'])
+        df_hit = pd.DataFrame(index=[name_row], columns=[
+                              'CB', 'MF', 'CF'])
         cb_hits = []
         mf_hits = []
         cf_hits = []
-        hy_hits = []
         if number_items_test == 'all':
             items_test = list(self.user.items_to_ignore)
-        # elif number_items_test > len(self.user.items_to_ignore):
-        #     print("NUMBER OF ITEMS TO TEST MUST BE SMALLER THAN {}".format(
-        #         len(self.user.items_to_ignore)))
+        else:
+            items_test = list(self.user.items_to_ignore)[0:number_items_test]
+        for i, IT in enumerate(items_test):
+            print("{} of {} items".format(i, len(items_test)))
+            new_utility = self.user.utility_matrix.copy()
+            new_utility.loc[self.user.id, IT] = 0.0
+            new_interactions = self.user.interactions_df.drop(self.user.interactions_df[(
+                self.user.interactions_df.personId == self.user.id) & (self.user.interactions_df.contentId == IT)].index)
+            new_user_object = User(self.user.id, new_utility, new_interactions)
+            nhy = HYBRID(new_user_object, self.factors_mf,
+                         self.N_cf, self.all_items, self.tfidf_matrix)
+            dict_top = nhy.get_top_N(topn)
+            if IT in dict_top['CB']:
+                cb_hits.append(IT)
+            if IT in dict_top['MF']:
+                mf_hits.append(IT)
+            if IT in dict_top['CF']:
+                cf_hits.append(IT)
+            if i == 0:
+                d = {}
+                for i, weights in enumerate(list_weights):
+                    d[i] = list()
+            for i, weights in enumerate(list_weights):
+                dict_hybrid = nhy.get_hybrid_predictions(weights)
+                ordered_keys = list({k: v for k, v in sorted(
+                    dict_hybrid.items(), key=lambda item: item[1], reverse=True)}.keys())
+                top_hybrid = ordered_keys[0:topn]
+                if IT in top_hybrid:
+                    d[i].append(IT)
+        for i, _ in enumerate(list_weights):
+            df_hit["HY-{}".format(i)] = len(d[i])
+        df_hit.loc[name_row, 'CB'] = len(cb_hits)
+        df_hit.loc[name_row, 'MF'] = len(mf_hits)
+        df_hit.loc[name_row, 'CF'] = len(cf_hits)
+
+        return df_hit
+
+    def compare_ratings(self, list_weights, topn, number_items_test):
+        if number_items_test == 'all':
+            items_test = list(self.user.items_to_ignore)
+
         else:
             items_test = list(self.user.items_to_ignore)[0:number_items_test]
         df_res = pd.DataFrame(index=items_test, columns=[
-                              'ORIGINAL', 'CB', 'MF', 'CF', 'HY'])
+                              'ORIGINAL', 'CB', 'MF', 'CF'])
         for i, IT in enumerate(items_test):
             print("{} of {} items".format(i, len(items_test)))
             new_utility = self.user.utility_matrix.copy()
@@ -237,27 +287,12 @@ class HYBRID():
             nhy = HYBRID(new_user_object, self.factors_mf,
                          self.N_cf, self.all_items, self.tfidf_matrix)
             ndf_all = nhy.get_all_predictions()
-            dict_hybrid = nhy.get_hybrid_predictions(weights)
-            ordered_keys = list({k: v for k, v in sorted(
-                dict_hybrid.items(), key=lambda item: item[1], reverse=True)}.keys())
-            top_hybrid = ordered_keys[0:topn]
             df_res.loc[IT, 'ORIGINAL'] = self.user.utility_matrix.loc[self.user.id, IT]/5.0
             df_res.loc[IT, 'CB'] = ndf_all[IT].values[0]
             df_res.loc[IT, 'MF'] = ndf_all[IT].values[1]
             df_res.loc[IT, 'CF'] = ndf_all[IT].values[2]
-            df_res.loc[IT, 'HY'] = dict_hybrid[IT]
-            dict_top = nhy.get_top_N(topn)
-            if IT in dict_top['CB']:
-                cb_hits.append(IT)
-            if IT in dict_top['MF']:
-                mf_hits.append(IT)
-            if IT in dict_top['CF']:
-                cf_hits.append(IT)
-            if IT in top_hybrid:
-                hy_hits.append(IT)
-
-        df_hit.loc[name_row, 'CB'] = len(cb_hits)
-        df_hit.loc[name_row, 'MF'] = len(mf_hits)
-        df_hit.loc[name_row, 'CF'] = len(cf_hits)
-        df_hit.loc[name_row, 'HY'] = len(hy_hits)
-        return df_res, df_hit
+        for i, weights in enumerate(list_weights):
+            name_col = "HY-{}".format(i)
+            df_res[name_col] = df_res.apply(
+                lambda row: row['CB']*weights[0] + row['MF']*weights[1] + row['CF']*weights[2], axis=1)
+        return df_res
